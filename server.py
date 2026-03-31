@@ -2,6 +2,11 @@ import json
 import os
 import uuid
 import hashlib
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from datetime import datetime, timedelta
+import threading
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
@@ -19,6 +24,17 @@ DEV_DATA_FILE = os.path.join(DATA_DIR, "developers.json")
 UPLOAD_FOLDER = os.path.join(DATA_DIR, "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+# ⚠️ আপনার ইমেইল এবং এ্যাপ পাসওয়ার্ড এখানে দিন
+SENDER_EMAIL = "cloudnestotp@gmail.com"
+APP_PASSWORD = "smeu dhdn zdou yfwc"
+
+ADMIN_EMAIL = "ufbfahimyt250@gmail.com"
+
+# Memory stores for OTPs
+dev_otp_store = {} # Developer Login/Reg/Forgot
+app_otp_store = {} # BaaS App users
+recent_otps = [] # Last 10 OTPs
+
 # ==========================================
 #         HELPER FUNCTIONS
 # ==========================================
@@ -33,7 +49,6 @@ def save_devs(devs):
         json.dump(devs, f, indent=4)
 
 def generate_api_key(email):
-    """Email থেকে deterministic API key তৈরি হয় - লগআউট/লগিনেও same key আসে"""
     return "cn_" + hashlib.sha256(email.encode()).hexdigest()[:32]
 
 def get_dev_by_api_key(api_key):
@@ -44,7 +59,7 @@ def get_dev_by_api_key(api_key):
     return None, None
 
 def get_host_url():
-    return os.environ.get("RENDER_EXTERNAL_URL", "http://127.0.0.1:8080").rstrip('/')
+    return os.environ.get("RENDER_EXTERNAL_URL", "https://cloud-nest-website.onrender.com").rstrip('/')
 
 def format_bytes(b):
     if b < 1024: return f"{b} B"
@@ -52,54 +67,173 @@ def format_bytes(b):
     elif b < 1024**3: return f"{b/1024**2:.2f} MB"
     else: return f"{b/1024**3:.2f} GB"
 
+def send_email_async(to_email, subject, body):
+    def send():
+        try:
+            msg = MIMEMultipart()
+            msg['From'] = f"Cloud☁Nest <{SENDER_EMAIL}>"
+            msg['To'] = to_email
+            msg['Subject'] = subject
+            msg.attach(MIMEText(body, 'html'))
+            
+            server = smtplib.SMTP('smtp.gmail.com', 587)
+            server.starttls()
+            server.login(SENDER_EMAIL, APP_PASSWORD)
+            server.send_message(msg)
+            server.quit()
+        except Exception as e:
+            print("Email failed:", e)
+    threading.Thread(target=send).start()
+
+def log_recent_otp(email, code, purpose):
+    global recent_otps
+    recent_otps.insert(0, {"email": email, "code": code, "purpose": purpose, "time": datetime.now().strftime("%I:%M %p, %d %b")})
+    if len(recent_otps) > 10:
+        recent_otps.pop()
+
+def check_monthly_limit(dev_info, limit_type, amount=1):
+    if dev_info.get('plan') == 'premium':
+        return True, ""
+        
+    current_month = datetime.now().strftime('%Y-%m')
+    usage = dev_info.get('usage', {})
+    if current_month not in usage:
+        usage[current_month] = {"db": 0, "storage": 0, "auth": 0}
+        
+    # Limits for Free Plan
+    LIMITS = {"db": 25 * 1024**3, "storage": 10 * 1024**3, "auth": 250} # bytes and count
+    
+    if usage[current_month].get(limit_type, 0) + amount > LIMITS[limit_type]:
+        return False, f"Monthly limit exceeded for {limit_type}. Please upgrade to Premium."
+    
+    return True, usage
+
+def update_monthly_limit(email, limit_type, amount=1):
+    devs = load_devs()
+    if email in devs:
+        current_month = datetime.now().strftime('%Y-%m')
+        if 'usage' not in devs[email]: devs[email]['usage'] = {}
+        if current_month not in devs[email]['usage']: devs[email]['usage'][current_month] = {"db": 0, "storage": 0, "auth": 0}
+        devs[email]['usage'][current_month][limit_type] += amount
+        save_devs(devs)
+
 # ==========================================
-#         KEEP-ALIVE (Cron-job.org এ এই URL দাও)
+#         KEEP-ALIVE
 # ==========================================
 @app.route('/ping')
 def ping():
-    """cron-job.org এ এই /ping URL দিলে Render স্লিপ করবে না"""
     return jsonify({"status": "alive", "message": "☁️ CloudNest is running!"})
 
 @app.route('/')
 def home():
-    return jsonify({"status": "ok", "service": "CloudNest API", "version": "2.0"})
+    return jsonify({"status": "ok", "service": "CloudNest API", "version": "2.1"})
 
 # ==========================================
-#         DEVELOPER AUTH
+#         OTP & AUTHENTICATION
 # ==========================================
-@app.route('/api/dev/register', methods=['POST'])
-def dev_register():
-    data = request.json or {}
-    name = data.get('name', '').strip()
-    email = data.get('email', '').strip().lower()
-    password = data.get('password', '').strip()
-
-    if not name or not email or not password:
-        return jsonify({"status": "error", "message": "সব ফিল্ড পূরণ করুন।"})
-
-    devs = load_devs()
-    if email in devs:
-        return jsonify({"status": "error", "message": "এই ইমেইল আগেই রেজিস্টার্ড।"})
-
-    api_key = generate_api_key(email)
-    devs[email] = {"name": name, "email": email, "password": password, "api_key": api_key}
-    save_devs(devs)
-    return jsonify({"status": "success", "message": "রেজিস্ট্রেশন সফল!", "api_key": api_key, "name": name, "email": email})
-
-@app.route('/api/dev/login', methods=['POST'])
-def dev_login():
+@app.route('/api/dev/send-otp', methods=['POST'])
+def dev_send_otp():
     data = request.json or {}
     email = data.get('email', '').strip().lower()
-    password = data.get('password', '').strip()
-
+    action = data.get('action', '')
+    
+    if not email.endswith('@gmail.com'):
+        return jsonify({"status": "error", "message": "Only @gmail.com is allowed!"})
+        
     devs = load_devs()
-    if email in devs and devs[email]['password'] == password:
+    if action == 'register' and email in devs:
+        return jsonify({"status": "error", "message": "This email is already registered."})
+    if action in ['login', 'forgot'] and email not in devs:
+        return jsonify({"status": "error", "message": "Email not found. Please register."})
+
+    import random
+    code = str(random.randint(100000, 999999))
+    dev_otp_store[email] = {
+        "code": code,
+        "expires": datetime.now() + timedelta(minutes=5),
+        "action": action
+    }
+    
+    # Facebook like OTP template
+    html_body = f"""
+    <div style='font-family: Helvetica, Arial, sans-serif; padding: 20px; background-color: #f0f2f5;'>
+        <div style='background-color: #ffffff; padding: 30px; border-radius: 8px; max-width: 500px; margin: 0 auto; box-shadow: 0 2px 4px rgba(0,0,0,0.1);'>
+            <h2 style='color: #1877f2; text-align: center; margin-bottom: 20px;'>Cloud☁Nest</h2>
+            <p style='color: #1c1e21; font-size: 16px;'>Hello,</p>
+            <p style='color: #1c1e21; font-size: 16px;'>We received a request to verify your email. Your OTP code is:</p>
+            <div style='background-color: #f0f2f5; padding: 15px; text-align: center; border-radius: 6px; margin: 20px 0;'>
+                <span style='font-size: 32px; font-weight: bold; letter-spacing: 5px; color: #1c1e21;'>{code}</span>
+            </div>
+            <p style='color: #606770; font-size: 14px; text-align: center;'>This code will expire in 5 minutes.</p>
+        </div>
+    </div>
+    """
+    send_email_async(email, "Your CloudNest Recovery Code", html_body)
+    return jsonify({"status": "success", "message": "OTP sent to your email."})
+
+@app.route('/api/dev/verify-otp', methods=['POST'])
+def dev_verify_otp():
+    data = request.json or {}
+    email = data.get('email', '').strip().lower()
+    code = data.get('code', '').strip()
+    action = data.get('action', '')
+    
+    if email not in dev_otp_store or dev_otp_store[email]['code'] != code:
+        return jsonify({"status": "error", "message": "Invalid OTP code."})
+    if datetime.now() > dev_otp_store[email]['expires'] or dev_otp_store[email]['action'] != action:
+        return jsonify({"status": "error", "message": "OTP has expired. Request a new one."})
+        
+    del dev_otp_store[email] # One time use
+    devs = load_devs()
+    
+    if action == 'register':
+        password = data.get('password', '')
+        name = data.get('name', '')
+        api_key = generate_api_key(email)
+        devs[email] = {"name": name, "email": email, "password": password, "api_key": api_key, "plan": "free", "usage": {}}
+        save_devs(devs)
+        return jsonify({"status": "success", "message": "Registration successful!", "api_key": api_key, "name": name, "email": email, "plan": "free"})
+        
+    elif action == 'login':
         info = devs[email]
-        return jsonify({"status": "success", "api_key": info['api_key'], "name": info['name'], "email": email})
-    return jsonify({"status": "error", "message": "ইমেইল বা পাসওয়ার্ড ভুল।"})
+        return jsonify({"status": "success", "api_key": info['api_key'], "name": info['name'], "email": email, "plan": info.get('plan', 'free')})
+        
+    elif action == 'forgot':
+        new_password = data.get('new_password', '')
+        devs[email]['password'] = new_password
+        save_devs(devs)
+        return jsonify({"status": "success", "message": "Password updated successfully!"})
 
 # ==========================================
-#         REALTIME DATABASE API
+#         ADMIN PREMIUM FEATURE
+# ==========================================
+@app.route('/api/admin/make-premium', methods=['POST'])
+def make_premium():
+    data = request.json or {}
+    api_key = data.get('api_key')
+    target_email = data.get('target_email', '').strip().lower()
+    
+    user_email, _ = get_dev_by_api_key(api_key)
+    if user_email != ADMIN_EMAIL:
+        return jsonify({"status": "error", "message": "Unauthorized. Admin only."})
+        
+    devs = load_devs()
+    if target_email in devs:
+        devs[target_email]['plan'] = 'premium'
+        save_devs(devs)
+        return jsonify({"status": "success", "message": f"{target_email} has been upgraded to Premium!"})
+    return jsonify({"status": "error", "message": "User not found."})
+
+@app.route('/api/admin/recent-otps', methods=['POST'])
+def get_recent_otps():
+    api_key = (request.json or {}).get('api_key')
+    user_email, _ = get_dev_by_api_key(api_key)
+    if not user_email:
+        return jsonify({"status": "error", "message": "Unauthorized"})
+    return jsonify({"status": "success", "data": recent_otps})
+
+# ==========================================
+#         DATABASE, AUTH, STORAGE APIs
 # ==========================================
 @app.route('/api/db', methods=['POST'])
 def api_db():
@@ -109,44 +243,37 @@ def api_db():
     key = data.get('key', 'default')
     payload = data.get('data', '')
 
-    user_id, dev_info = get_dev_by_api_key(api_key)
-    if not user_id:
+    user_email, dev_info = get_dev_by_api_key(api_key)
+    if not user_email:
         return jsonify({"status": "error", "message": "Invalid API Key."})
 
     db_file = os.path.join(DATA_DIR, f"{api_key}_db.json")
     db_data = {}
     if os.path.exists(db_file):
-        with open(db_file, "r") as f:
-            db_data = json.load(f)
+        with open(db_file, "r") as f: db_data = json.load(f)
 
-    if action == 'save':
+    if action in ['save', 'edit']:
+        payload_size = len(str(payload).encode('utf-8'))
+        allowed, msg = check_monthly_limit(dev_info, 'db', payload_size)
+        if not allowed: return jsonify({"status": "error", "message": msg})
+        
         db_data[key] = payload
         with open(db_file, "w") as f: json.dump(db_data, f, indent=2)
+        update_monthly_limit(user_email, 'db', payload_size)
         return jsonify({"status": "success", "message": "Data saved!"})
 
     elif action == 'load':
         return jsonify({"status": "success", "data": db_data.get(key, "")})
-
     elif action == 'all':
         return jsonify({"status": "success", "data": db_data})
-
     elif action == 'delete':
         if key in db_data:
             del db_data[key]
             with open(db_file, "w") as f: json.dump(db_data, f, indent=2)
         return jsonify({"status": "success", "message": "Deleted."})
 
-    elif action == 'edit':
-        new_data = data.get('new_data', '')
-        db_data[key] = new_data
-        with open(db_file, "w") as f: json.dump(db_data, f, indent=2)
-        return jsonify({"status": "success", "message": "Updated."})
-
     return jsonify({"status": "error", "message": "Invalid action."})
 
-# ==========================================
-#         AUTHENTICATION API
-# ==========================================
 @app.route('/api/auth', methods=['POST'])
 def api_auth():
     data = request.json or {}
@@ -155,38 +282,38 @@ def api_auth():
     username = data.get('username', '')
     password = data.get('password', '')
 
-    user_id, dev_info = get_dev_by_api_key(api_key)
-    if not user_id:
+    user_email, dev_info = get_dev_by_api_key(api_key)
+    if not user_email:
         return jsonify({"status": "error", "message": "Invalid API Key."})
 
     auth_file = os.path.join(DATA_DIR, f"{api_key}_auth.json")
     auth_data = {}
     if os.path.exists(auth_file):
-        with open(auth_file, "r") as f:
-            auth_data = json.load(f)
+        with open(auth_file, "r") as f: auth_data = json.load(f)
 
     if action == 'register':
         if username in auth_data:
             return jsonify({"status": "error", "message": "User already exists!"})
+        allowed, msg = check_monthly_limit(dev_info, 'auth', 1)
+        if not allowed: return jsonify({"status": "error", "message": msg})
+        
         uid = str(uuid.uuid4())
         auth_data[username] = {"password": password, "uid": uid}
         with open(auth_file, "w") as f: json.dump(auth_data, f, indent=2)
+        update_monthly_limit(user_email, 'auth', 1)
         return jsonify({"status": "success", "message": "Registered!", "uid": uid})
 
     elif action == 'login':
         if username in auth_data and auth_data[username]['password'] == password:
             return jsonify({"status": "success", "message": "Logged in!", "uid": auth_data[username].get('uid', '')})
         return jsonify({"status": "error", "message": "Wrong credentials."})
-
     elif action == 'all':
         return jsonify({"status": "success", "data": auth_data})
-
     elif action == 'delete':
         if username in auth_data:
             del auth_data[username]
             with open(auth_file, "w") as f: json.dump(auth_data, f, indent=2)
         return jsonify({"status": "success", "message": "User deleted."})
-
     elif action == 'edit':
         new_password = data.get('new_password', '')
         if username in auth_data and new_password:
@@ -197,37 +324,69 @@ def api_auth():
 
     return jsonify({"status": "error", "message": "Invalid action."})
 
-# ==========================================
-#         FILE STORAGE API
-# ==========================================
+# -- BAAS OTP FOR APP USERS --
+@app.route('/api/auth/send-otp', methods=['POST'])
+def baas_send_otp():
+    data = request.json or {}
+    api_key = data.get('api_key')
+    email = data.get('email', '')
+    user_email, _ = get_dev_by_api_key(api_key)
+    if not user_email: return jsonify({"status": "error", "message": "Invalid API Key."})
+    
+    import random
+    code = str(random.randint(100000, 999999))
+    app_otp_store[api_key + "_" + email] = {"code": code, "expires": datetime.now() + timedelta(minutes=5)}
+    
+    log_recent_otp(email, code, f"App Auth")
+    send_email_async(email, "App Verification Code", f"<h2>Your App OTP Code is: {code}</h2>")
+    return jsonify({"status": "success", "message": "OTP Sent!"})
+
+@app.route('/api/auth/verify-otp', methods=['POST'])
+def baas_verify_otp():
+    data = request.json or {}
+    api_key = data.get('api_key')
+    email = data.get('email', '')
+    code = data.get('code', '')
+    store_key = api_key + "_" + email
+    
+    if store_key in app_otp_store and app_otp_store[store_key]['code'] == code:
+        if datetime.now() < app_otp_store[store_key]['expires']:
+            del app_otp_store[store_key]
+            return jsonify({"status": "success", "message": "OTP Verified"})
+    return jsonify({"status": "error", "message": "Invalid or expired OTP"})
+
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
     api_key = request.form.get('api_key')
-    user_id, dev_info = get_dev_by_api_key(api_key)
-    if not user_id:
-        return jsonify({"status": "error", "message": "Invalid API key"})
+    user_email, dev_info = get_dev_by_api_key(api_key)
+    if not user_email: return jsonify({"status": "error", "message": "Invalid API key"})
 
-    if 'file' not in request.files:
-        return jsonify({"status": "error", "message": "No file uploaded"})
+    if 'file' not in request.files: return jsonify({"status": "error", "message": "No file uploaded"})
     file = request.files['file']
-    if file.filename == '':
-        return jsonify({"status": "error", "message": "Empty file"})
+    if file.filename == '': return jsonify({"status": "error", "message": "Empty file"})
+    
+    file.seek(0, os.SEEK_END)
+    file_size = file.tell()
+    file.seek(0)
+    
+    allowed, msg = check_monthly_limit(dev_info, 'storage', file_size)
+    if not allowed: return jsonify({"status": "error", "message": msg})
 
     filename = secure_filename(file.filename)
     unique_filename = f"{api_key}_{uuid.uuid4().hex[:8]}_{filename}"
     filepath = os.path.join(UPLOAD_FOLDER, unique_filename)
     file.save(filepath)
-    size = os.path.getsize(filepath)
+    update_monthly_limit(user_email, 'storage', file_size)
+    
     file_url = f"{get_host_url()}/uploads/{unique_filename}"
-    return jsonify({"status": "success", "url": file_url, "filename": unique_filename, "size": format_bytes(size)})
+    return jsonify({"status": "success", "url": file_url, "filename": unique_filename, "size": format_bytes(file_size)})
 
 @app.route('/api/storage/list', methods=['POST'])
 def list_files():
     data = request.json or {}
     api_key = data.get('api_key')
-    user_id, _ = get_dev_by_api_key(api_key)
-    if not user_id:
-        return jsonify({"status": "error", "message": "Invalid API Key."})
+    user_email, _ = get_dev_by_api_key(api_key)
+    if not user_email: return jsonify({"status": "error", "message": "Invalid API Key."})
 
     files = []
     for fname in os.listdir(UPLOAD_FOLDER):
@@ -250,11 +409,10 @@ def delete_file_api():
     data = request.json or {}
     api_key = data.get('api_key')
     filename = data.get('filename', '')
-    user_id, _ = get_dev_by_api_key(api_key)
-    if not user_id:
-        return jsonify({"status": "error", "message": "Invalid API Key."})
-    if not filename.startswith(api_key + "_"):
-        return jsonify({"status": "error", "message": "Unauthorized."})
+    user_email, _ = get_dev_by_api_key(api_key)
+    if not user_email: return jsonify({"status": "error", "message": "Invalid API Key."})
+    if not filename.startswith(api_key + "_"): return jsonify({"status": "error", "message": "Unauthorized."})
+    
     fpath = os.path.join(UPLOAD_FOLDER, filename)
     if os.path.exists(fpath):
         os.remove(fpath)
@@ -264,17 +422,17 @@ def delete_file_api():
 def serve_file(filename):
     return send_from_directory(UPLOAD_FOLDER, filename)
 
-# ==========================================
-#         USAGE API
-# ==========================================
 @app.route('/api/usage', methods=['POST'])
 def usage():
     data = request.json or {}
     api_key = data.get('api_key')
-    user_id, _ = get_dev_by_api_key(api_key)
-    if not user_id:
-        return jsonify({"status": "error", "message": "Invalid API Key."})
+    user_email, dev_info = get_dev_by_api_key(api_key)
+    if not user_email: return jsonify({"status": "error", "message": "Invalid API Key."})
 
+    current_month = datetime.now().strftime('%Y-%m')
+    usage_data = dev_info.get('usage', {}).get(current_month, {"db": 0, "storage": 0, "auth": 0})
+    
+    # Calculate file count and total real bytes
     storage_bytes = 0
     file_count = 0
     for fname in os.listdir(UPLOAD_FOLDER):
@@ -290,6 +448,9 @@ def usage():
 
     return jsonify({
         "status": "success",
+        "plan": dev_info.get('plan', 'free'),
+        "month": current_month,
+        "monthly_usage": usage_data,
         "storage": format_bytes(storage_bytes),
         "storage_bytes": storage_bytes,
         "database": format_bytes(db_bytes),
@@ -299,17 +460,13 @@ def usage():
         "file_count": file_count
     })
 
-# ==========================================
-#         RULES API
-# ==========================================
 @app.route('/api/rules', methods=['POST'])
 def rules_api():
     data = request.json or {}
     api_key = data.get('api_key')
     action = data.get('action', 'get')
-    user_id, _ = get_dev_by_api_key(api_key)
-    if not user_id:
-        return jsonify({"status": "error", "message": "Invalid API Key."})
+    user_email, _ = get_dev_by_api_key(api_key)
+    if not user_email: return jsonify({"status": "error", "message": "Invalid API Key."})
 
     rules_file = os.path.join(DATA_DIR, f"{api_key}_rules.json")
     default_rules = '{\n  "rules": {\n    ".read": "true",\n    ".write": "true"\n  }\n}'
@@ -322,26 +479,19 @@ def rules_api():
 
     elif action == 'update':
         rules_text = data.get('rules', default_rules)
-        try:
-            json.loads(rules_text)  # validate JSON
-        except:
-            return jsonify({"status": "error", "message": "Invalid JSON format."})
+        try: json.loads(rules_text)
+        except: return jsonify({"status": "error", "message": "Invalid JSON format."})
         with open(rules_file, 'w') as f:
             f.write(rules_text)
         return jsonify({"status": "success", "message": "Rules updated!"})
 
     return jsonify({"status": "error", "message": "Invalid action."})
 
-# ==========================================
-#         START SERVER
-# ==========================================
 if __name__ == '__main__':
     print("=" * 45)
-    print("   ☁️  CloudNest API Server v2.0")
+    print("   ☁️  CloudNest API Server v2.1")
     print("=" * 45)
     print(f"🌐 Server : {get_host_url()}")
     print(f"📌 Port   : {PORT}")
-    print(f"📁 Data   : {os.path.abspath(DATA_DIR)}")
-    print(f"🔔 Ping   : {get_host_url()}/ping  ← Cron-job.org এ এটা দাও")
     print("=" * 45)
     app.run(host="0.0.0.0", port=PORT, use_reloader=False)
