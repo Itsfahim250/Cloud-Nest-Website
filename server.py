@@ -70,19 +70,23 @@ def format_bytes(b):
 def send_email_async(to_email, subject, body):
     def send():
         try:
-            msg = MIMEMultipart()
-            msg['From'] = f"Cloud☁Nest <{SENDER_EMAIL}>"
-            msg['To'] = to_email
-            msg['Subject'] = subject
-            msg.attach(MIMEText(body, 'html'))
+            # আপনার দেওয়া লজিক অনুযায়ী Raw Email String তৈরি করা হলো
+            # HTML কাজ করার জন্য Content-Type যুক্ত করা হয়েছে
+            email_body_full = f"From: Cloud☁Nest <{SENDER_EMAIL}>\nTo: {to_email}\nSubject: {subject}\nContent-Type: text/html; charset=utf-8\n\n{body}"
             
-            server = smtplib.SMTP('smtp.gmail.com', 587)
-            server.starttls()
-            server.login(SENDER_EMAIL, APP_PASSWORD)
-            server.send_message(msg)
-            server.quit()
+            rocx = smtplib.SMTP('smtp.gmail.com', 587)
+            rocx.ehlo()
+            rocx.starttls()
+            rocx.login(SENDER_EMAIL, APP_PASSWORD)
+            
+            # encode('utf-8') দেওয়া হয়েছে যাতে ইমোজি বা স্টাইল ইরোর না দেয়
+            rocx.sendmail(SENDER_EMAIL, to_email, email_body_full.encode('utf-8'))
+            rocx.quit()
+            
+            print(f"✅ OTP Email Sent Successfully to {to_email}")
         except Exception as e:
-            print("Email failed:", e)
+            print("❌ Email failed:", e)
+            
     threading.Thread(target=send).start()
 
 def log_recent_otp(email, code, purpose):
