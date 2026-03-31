@@ -86,10 +86,8 @@ def send_email_async(to_email, subject, body):
             rocx.login(SENDER_EMAIL, APP_PASSWORD)
             rocx.sendmail(SENDER_EMAIL, to_email, msg.as_string())
             rocx.quit()
-
-            print(f"✅ OTP Email Sent Successfully to {to_email}")
         except Exception as e:
-            print("❌ Email failed:", e)
+            print(f"EMAIL_ERROR: {e}")
 
     threading.Thread(target=send).start()
 
@@ -130,7 +128,7 @@ def update_monthly_limit(email, limit_type, amount=1):
 # ==========================================
 @app.route('/ping')
 def ping():
-    return jsonify({"status": "alive", "message": "☁️ CloudNest is running!"})
+    return "ok", 200
 
 @app.route('/')
 def home():
@@ -162,19 +160,14 @@ def dev_send_otp():
         "action": action
     }
     
-    # Facebook like OTP template
     html_body = f"""
-    <div style='font-family: Helvetica, Arial, sans-serif; padding: 20px; background-color: #f0f2f5;'>
-        <div style='background-color: #ffffff; padding: 30px; border-radius: 8px; max-width: 500px; margin: 0 auto; box-shadow: 0 2px 4px rgba(0,0,0,0.1);'>
-            <h2 style='color: #1877f2; text-align: center; margin-bottom: 20px;'>CloudNest</h2>
-            <p style='color: #1c1e21; font-size: 16px;'>Hello,</p>
-            <p style='color: #1c1e21; font-size: 16px;'>We received a request to verify your email. Your OTP code is:</p>
-            <div style='background-color: #f0f2f5; padding: 15px; text-align: center; border-radius: 6px; margin: 20px 0;'>
-                <span style='font-size: 32px; font-weight: bold; letter-spacing: 5px; color: #1c1e21;'>{code}</span>
-            </div>
-            <p style='color: #606770; font-size: 14px; text-align: center;'>This code will expire in 5 minutes.</p>
-        </div>
-    </div>
+<html><body>
+<p>Hello,</p>
+<p>Your CloudNest verification code is:</p>
+<h2>{code}</h2>
+<p>This code will expire in 5 minutes.</p>
+<p>CloudNest Team</p>
+</body></html>
     """
     send_email_async(email, "Your CloudNest Recovery Code", html_body)
     return jsonify({"status": "success", "message": "OTP sent to your email."})
@@ -348,16 +341,12 @@ def baas_send_otp():
     log_recent_otp(email, code, f"App Auth")
 
     html_body = f"""
-    <div style='font-family: Helvetica, Arial, sans-serif; padding: 20px; background-color: #f0f2f5;'>
-        <div style='background-color: #ffffff; padding: 30px; border-radius: 8px; max-width: 500px; margin: 0 auto;'>
-            <h2 style='color: #1877f2; text-align: center;'>App Verification</h2>
-            <p style='color: #1c1e21; font-size: 16px;'>Your OTP Code:</p>
-            <div style='background-color: #f0f2f5; padding: 15px; text-align: center; border-radius: 6px; margin: 20px 0;'>
-                <span style='font-size: 32px; font-weight: bold; letter-spacing: 5px; color: #1c1e21;'>{code}</span>
-            </div>
-            <p style='color: #606770; font-size: 14px; text-align: center;'>This code will expire in 5 minutes.</p>
-        </div>
-    </div>
+<html><body>
+<p>Hello,</p>
+<p>Your verification code is:</p>
+<h2>{code}</h2>
+<p>This code will expire in 5 minutes.</p>
+</body></html>
     """
     send_email_async(email, "App Verification Code", html_body)
     return jsonify({"status": "success", "message": "OTP Sent!"})
@@ -508,10 +497,4 @@ def rules_api():
     return jsonify({"status": "error", "message": "Invalid action."})
 
 if __name__ == '__main__':
-    print("=" * 45)
-    print("   ☁️  CloudNest API Server v2.1")
-    print("=" * 45)
-    print(f"🌐 Server : {get_host_url()}")
-    print(f"📌 Port   : {PORT}")
-    print("=" * 45)
     app.run(host="0.0.0.0", port=PORT, use_reloader=False)
