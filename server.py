@@ -6,7 +6,6 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
-import threading
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
@@ -24,7 +23,7 @@ DEV_DATA_FILE = os.path.join(DATA_DIR, "developers.json")
 UPLOAD_FOLDER = os.path.join(DATA_DIR, "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# ⚠️ আপনার ইমেইল এবং এ্যাপ পাসওয়ার্ড এখানে দিন
+# ⚠️ আপনার ইমেইল এবং এ্যাপ পাসওয়ার্ড (App Password) এখানে দিন
 SENDER_EMAIL = "cloudnestotp@gmail.com"
 APP_PASSWORD = "smeu dhdn zdou yfwc"
 
@@ -33,7 +32,7 @@ ADMIN_EMAIL = "ufbfahimyt250@gmail.com"
 # Memory stores for OTPs
 dev_otp_store = {} # Developer Login/Reg/Forgot
 app_otp_store = {} # BaaS App users
-recent_otps = [] # Last 10 OTPs
+recent_otps = []   # Last 10 OTPs
 
 # ==========================================
 #         HELPER FUNCTIONS
@@ -67,29 +66,32 @@ def format_bytes(b):
     elif b < 1024**3: return f"{b/1024**2:.2f} MB"
     else: return f"{b/1024**3:.2f} GB"
 
-# ✅ FIX: Raw string এর বদলে MIMEMultipart ব্যবহার করা হয়েছে
-def send_email_async(to_email, subject, body):
-    def send():
-        try:
-            msg = MIMEMultipart('alternative')
-            msg['Subject'] = subject
-            msg['From'] = f"CloudNest <{SENDER_EMAIL}>"
-            msg['To'] = to_email
+# ✅ FIX: Synchronous Email Sending with SMTP_SSL (Port 465) for better reliability
+def send_email(to_email, subject, body):
+    try:
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = subject
+        msg['From'] = f"CloudNest <{SENDER_EMAIL}>"
+        msg['To'] = to_email
 
-            # HTML part attach করা হলো
-            part = MIMEText(body, 'html', 'utf-8')
-            msg.attach(part)
+        # HTML part attach
+        part = MIMEText(body, 'html', 'utf-8')
+        msg.attach(part)
 
-            rocx = smtplib.SMTP('smtp.gmail.com', 587)
-            rocx.ehlo()
-            rocx.starttls()
-            rocx.login(SENDER_EMAIL, APP_PASSWORD)
-            rocx.sendmail(SENDER_EMAIL, to_email, msg.as_string())
-            rocx.quit()
-        except Exception as e:
-            print(f"EMAIL_ERROR: {e}")
-
-    threading.Thread(target=send).start()
+        # Using SSL on Port 465 (Most secure and widely supported by Render/Heroku)
+        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
+        server.login(SENDER_EMAIL, APP_PASSWORD)
+        server.sendmail(SENDER_EMAIL, to_email, msg.as_string())
+        server.quit()
+        return True, "Email sent successfully"
+    except smtplib.SMTPAuthenticationError:
+        error_msg = "Gmail Authentication Failed. Please check App Password."
+        print(f"EMAIL_ERROR: {error_msg}")
+        return False, error_msg
+    except Exception as e:
+        error_msg = str(e)
+        print(f"EMAIL_ERROR: {error_msg}")
+        return False, error_msg
 
 def log_recent_otp(email, code, purpose):
     global recent_otps
@@ -106,8 +108,7 @@ def check_monthly_limit(dev_info, limit_type, amount=1):
     if current_month not in usage:
         usage[current_month] = {"db": 0, "storage": 0, "auth": 0}
         
-    # Limits for Free Plan
-    LIMITS = {"db": 25 * 1024**3, "storage": 10 * 1024**3, "auth": 250} # bytes and count
+    LIMITS = {"db": 25 * 1024**3, "storage": 10 * 1024**3, "auth": 250}
     
     if usage[current_month].get(limit_type, 0) + amount > LIMITS[limit_type]:
         return False, f"Monthly limit exceeded for {limit_type}. Please upgrade to Premium."
@@ -132,7 +133,7 @@ def ping():
 
 @app.route('/')
 def home():
-    return jsonify({"status": "ok", "service": "CloudNest API", "version": "2.1"})
+    return jsonify({"status": "ok", "service": "CloudNest API", "version": "2.2"})
 
 # ==========================================
 #         OTP & AUTHENTICATION
@@ -161,16 +162,31 @@ def dev_send_otp():
     }
     
     html_body = f"""
-<html><body>
-<p>Hello,</p>
-<p>Your CloudNest verification code is:</p>
-<h2>{code}</h2>
-<p>This code will expire in 5 minutes.</p>
-<p>CloudNest Team</p>
-</body></html>
+    <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; border: 1px solid #eaeaea; border-radius: 10px; overflow: hidden;">
+        <div style="background-color: #FF6D00; padding: 20px; text-align: center;">
+            <h1 style="color: #ffffff; margin: 0; font-size: 24px;">CloudNest Console</h1>
+        </div>
+        <div style="padding: 30px; background-color: #ffffff;">
+            <p style="font-size: 16px; color: #333333; margin-top: 0;">Hello,</p>
+            <p style="font-size: 16px; color: #555555;">Your verification code for CloudNest is:</p>
+            <div style="text-align: center; margin: 25px 0;">
+                <span style="font-size: 32px; font-weight: bold; letter-spacing: 5px; color: #1A1A2E; background-color: #F0F2F5; padding: 10px 20px; border-radius: 8px;">{code}</span>
+            </div>
+            <p style="font-size: 14px; color: #777777;">This code will expire in 5 minutes. Please do not share this code with anyone.</p>
+        </div>
+    </div>
     """
-    send_email_async(email, "Your CloudNest Recovery Code", html_body)
-    return jsonify({"status": "success", "message": "OTP sent to your email."})
+    
+    # ✅ Synchronous Call: Error catch for Frontend
+    success, err_msg = send_email(email, "Your CloudNest Verification Code", html_body)
+    
+    if success:
+        log_recent_otp(email, code, f"Dev {action.capitalize()}")
+        return jsonify({"status": "success", "message": "OTP sent to your email."})
+    else:
+        # If email fails, delete the OTP from memory so user can try again
+        if email in dev_otp_store: del dev_otp_store[email]
+        return jsonify({"status": "error", "message": f"Failed to send email: {err_msg}"})
 
 @app.route('/api/dev/verify-otp', methods=['POST'])
 def dev_verify_otp():
@@ -184,7 +200,7 @@ def dev_verify_otp():
     if datetime.now() > dev_otp_store[email]['expires'] or dev_otp_store[email]['action'] != action:
         return jsonify({"status": "error", "message": "OTP has expired. Request a new one."})
         
-    del dev_otp_store[email] # One time use
+    del dev_otp_store[email]
     devs = load_devs()
     
     if action == 'register':
@@ -245,8 +261,7 @@ def api_db():
     payload = data.get('data', '')
 
     user_email, dev_info = get_dev_by_api_key(api_key)
-    if not user_email:
-        return jsonify({"status": "error", "message": "Invalid API Key."})
+    if not user_email: return jsonify({"status": "error", "message": "Invalid API Key."})
 
     db_file = os.path.join(DATA_DIR, f"{api_key}_db.json")
     db_data = {}
@@ -284,8 +299,7 @@ def api_auth():
     password = data.get('password', '')
 
     user_email, dev_info = get_dev_by_api_key(api_key)
-    if not user_email:
-        return jsonify({"status": "error", "message": "Invalid API Key."})
+    if not user_email: return jsonify({"status": "error", "message": "Invalid API Key."})
 
     auth_file = os.path.join(DATA_DIR, f"{api_key}_auth.json")
     auth_data = {}
@@ -293,8 +307,7 @@ def api_auth():
         with open(auth_file, "r") as f: auth_data = json.load(f)
 
     if action == 'register':
-        if username in auth_data:
-            return jsonify({"status": "error", "message": "User already exists!"})
+        if username in auth_data: return jsonify({"status": "error", "message": "User already exists!"})
         allowed, msg = check_monthly_limit(dev_info, 'auth', 1)
         if not allowed: return jsonify({"status": "error", "message": msg})
         
@@ -325,7 +338,6 @@ def api_auth():
 
     return jsonify({"status": "error", "message": "Invalid action."})
 
-# -- BAAS OTP FOR APP USERS --
 @app.route('/api/auth/send-otp', methods=['POST'])
 def baas_send_otp():
     data = request.json or {}
@@ -338,18 +350,14 @@ def baas_send_otp():
     code = str(random.randint(100000, 999999))
     app_otp_store[api_key + "_" + email] = {"code": code, "expires": datetime.now() + timedelta(minutes=5)}
     
-    log_recent_otp(email, code, f"App Auth")
-
-    html_body = f"""
-<html><body>
-<p>Hello,</p>
-<p>Your verification code is:</p>
-<h2>{code}</h2>
-<p>This code will expire in 5 minutes.</p>
-</body></html>
-    """
-    send_email_async(email, "App Verification Code", html_body)
-    return jsonify({"status": "success", "message": "OTP Sent!"})
+    html_body = f"<h2>Your App Verification Code: {code}</h2>"
+    
+    success, err_msg = send_email(email, "App Verification Code", html_body)
+    if success:
+        log_recent_otp(email, code, f"App Auth")
+        return jsonify({"status": "success", "message": "OTP Sent!"})
+    else:
+        return jsonify({"status": "error", "message": f"SMTP Error: {err_msg}"})
 
 @app.route('/api/auth/verify-otp', methods=['POST'])
 def baas_verify_otp():
@@ -424,8 +432,7 @@ def delete_file_api():
     if not filename.startswith(api_key + "_"): return jsonify({"status": "error", "message": "Unauthorized."})
     
     fpath = os.path.join(UPLOAD_FOLDER, filename)
-    if os.path.exists(fpath):
-        os.remove(fpath)
+    if os.path.exists(fpath): os.remove(fpath)
     return jsonify({"status": "success", "message": "File deleted."})
 
 @app.route('/uploads/<filename>')
@@ -461,11 +468,9 @@ def usage():
         "month": current_month,
         "monthly_usage": usage_data,
         "storage": format_bytes(storage_bytes),
-        "storage_bytes": storage_bytes,
         "database": format_bytes(db_bytes),
         "authentication": format_bytes(auth_bytes),
         "total": format_bytes(total),
-        "total_bytes": total,
         "file_count": file_count
     })
 
@@ -482,16 +487,14 @@ def rules_api():
 
     if action == 'get':
         if os.path.exists(rules_file):
-            with open(rules_file) as f:
-                return jsonify({"status": "success", "rules": f.read()})
+            with open(rules_file) as f: return jsonify({"status": "success", "rules": f.read()})
         return jsonify({"status": "success", "rules": default_rules})
 
     elif action == 'update':
         rules_text = data.get('rules', default_rules)
         try: json.loads(rules_text)
         except: return jsonify({"status": "error", "message": "Invalid JSON format."})
-        with open(rules_file, 'w') as f:
-            f.write(rules_text)
+        with open(rules_file, 'w') as f: f.write(rules_text)
         return jsonify({"status": "success", "message": "Rules updated!"})
 
     return jsonify({"status": "error", "message": "Invalid action."})
