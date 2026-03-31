@@ -88,7 +88,7 @@ def ping():
 
 @app.route('/')
 def home():
-    return jsonify({"status": "ok", "service": "CloudNest API", "version": "2.3 (Direct Auth)"})
+    return jsonify({"status": "ok", "service": "CloudNest API", "version": "3.0"})
 
 # ==========================================
 #         DIRECT AUTHENTICATION (NO OTP)
@@ -97,8 +97,8 @@ def home():
 def dev_auth():
     data = request.json or {}
     email = data.get('email', '').strip().lower()
-    password = data.get('password', '')
     action = data.get('action', '')
+    password = data.get('password', '')
     
     if not email.endswith('@gmail.com'):
         return jsonify({"status": "error", "message": "Only @gmail.com is allowed!"})
@@ -109,20 +109,27 @@ def dev_auth():
         if email in devs:
             return jsonify({"status": "error", "message": "This email is already registered."})
         name = data.get('name', '')
-        if len(password) < 6:
-            return jsonify({"status": "error", "message": "Password must be at least 6 characters."})
-            
         api_key = generate_api_key(email)
         devs[email] = {"name": name, "email": email, "password": password, "api_key": api_key, "plan": "free", "usage": {}}
         save_devs(devs)
         return jsonify({"status": "success", "message": "Registration successful!", "api_key": api_key, "name": name, "email": email, "plan": "free"})
         
     elif action == 'login':
-        if email not in devs or devs[email].get('password') != password:
-            return jsonify({"status": "error", "message": "Invalid email or password."})
-            
+        if email not in devs:
+            return jsonify({"status": "error", "message": "Email not found. Please register."})
+        if devs[email].get('password') != password:
+            return jsonify({"status": "error", "message": "Incorrect password."})
+        
         info = devs[email]
         return jsonify({"status": "success", "message": "Login successful!", "api_key": info['api_key'], "name": info['name'], "email": email, "plan": info.get('plan', 'free')})
+        
+    elif action == 'forgot':
+        if email not in devs:
+            return jsonify({"status": "error", "message": "Email not found."})
+        new_password = data.get('new_password', '')
+        devs[email]['password'] = new_password
+        save_devs(devs)
+        return jsonify({"status": "success", "message": "Password updated successfully!"})
 
     return jsonify({"status": "error", "message": "Invalid action."})
 
