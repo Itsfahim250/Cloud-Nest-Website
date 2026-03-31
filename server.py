@@ -67,26 +67,30 @@ def format_bytes(b):
     elif b < 1024**3: return f"{b/1024**2:.2f} MB"
     else: return f"{b/1024**3:.2f} GB"
 
+# ✅ FIX: Raw string এর বদলে MIMEMultipart ব্যবহার করা হয়েছে
 def send_email_async(to_email, subject, body):
     def send():
         try:
-            # আপনার দেওয়া লজিক অনুযায়ী Raw Email String তৈরি করা হলো
-            # HTML কাজ করার জন্য Content-Type যুক্ত করা হয়েছে
-            email_body_full = f"From: Cloud☁Nest <{SENDER_EMAIL}>\nTo: {to_email}\nSubject: {subject}\nContent-Type: text/html; charset=utf-8\n\n{body}"
-            
+            msg = MIMEMultipart('alternative')
+            msg['Subject'] = subject
+            msg['From'] = f"CloudNest <{SENDER_EMAIL}>"
+            msg['To'] = to_email
+
+            # HTML part attach করা হলো
+            part = MIMEText(body, 'html', 'utf-8')
+            msg.attach(part)
+
             rocx = smtplib.SMTP('smtp.gmail.com', 587)
             rocx.ehlo()
             rocx.starttls()
             rocx.login(SENDER_EMAIL, APP_PASSWORD)
-            
-            # encode('utf-8') দেওয়া হয়েছে যাতে ইমোজি বা স্টাইল ইরোর না দেয়
-            rocx.sendmail(SENDER_EMAIL, to_email, email_body_full.encode('utf-8'))
+            rocx.sendmail(SENDER_EMAIL, to_email, msg.as_string())
             rocx.quit()
-            
+
             print(f"✅ OTP Email Sent Successfully to {to_email}")
         except Exception as e:
             print("❌ Email failed:", e)
-            
+
     threading.Thread(target=send).start()
 
 def log_recent_otp(email, code, purpose):
@@ -162,7 +166,7 @@ def dev_send_otp():
     html_body = f"""
     <div style='font-family: Helvetica, Arial, sans-serif; padding: 20px; background-color: #f0f2f5;'>
         <div style='background-color: #ffffff; padding: 30px; border-radius: 8px; max-width: 500px; margin: 0 auto; box-shadow: 0 2px 4px rgba(0,0,0,0.1);'>
-            <h2 style='color: #1877f2; text-align: center; margin-bottom: 20px;'>Cloud☁Nest</h2>
+            <h2 style='color: #1877f2; text-align: center; margin-bottom: 20px;'>CloudNest</h2>
             <p style='color: #1c1e21; font-size: 16px;'>Hello,</p>
             <p style='color: #1c1e21; font-size: 16px;'>We received a request to verify your email. Your OTP code is:</p>
             <div style='background-color: #f0f2f5; padding: 15px; text-align: center; border-radius: 6px; margin: 20px 0;'>
@@ -342,7 +346,20 @@ def baas_send_otp():
     app_otp_store[api_key + "_" + email] = {"code": code, "expires": datetime.now() + timedelta(minutes=5)}
     
     log_recent_otp(email, code, f"App Auth")
-    send_email_async(email, "App Verification Code", f"<h2>Your App OTP Code is: {code}</h2>")
+
+    html_body = f"""
+    <div style='font-family: Helvetica, Arial, sans-serif; padding: 20px; background-color: #f0f2f5;'>
+        <div style='background-color: #ffffff; padding: 30px; border-radius: 8px; max-width: 500px; margin: 0 auto;'>
+            <h2 style='color: #1877f2; text-align: center;'>App Verification</h2>
+            <p style='color: #1c1e21; font-size: 16px;'>Your OTP Code:</p>
+            <div style='background-color: #f0f2f5; padding: 15px; text-align: center; border-radius: 6px; margin: 20px 0;'>
+                <span style='font-size: 32px; font-weight: bold; letter-spacing: 5px; color: #1c1e21;'>{code}</span>
+            </div>
+            <p style='color: #606770; font-size: 14px; text-align: center;'>This code will expire in 5 minutes.</p>
+        </div>
+    </div>
+    """
+    send_email_async(email, "App Verification Code", html_body)
     return jsonify({"status": "success", "message": "OTP Sent!"})
 
 @app.route('/api/auth/verify-otp', methods=['POST'])
@@ -436,7 +453,6 @@ def usage():
     current_month = datetime.now().strftime('%Y-%m')
     usage_data = dev_info.get('usage', {}).get(current_month, {"db": 0, "storage": 0, "auth": 0})
     
-    # Calculate file count and total real bytes
     storage_bytes = 0
     file_count = 0
     for fname in os.listdir(UPLOAD_FOLDER):
