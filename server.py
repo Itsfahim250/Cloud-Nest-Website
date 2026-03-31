@@ -2,10 +2,7 @@ import json
 import os
 import uuid
 import hashlib
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from datetime import datetime, timedelta
+from datetime import datetime
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
@@ -23,16 +20,7 @@ DEV_DATA_FILE = os.path.join(DATA_DIR, "developers.json")
 UPLOAD_FOLDER = os.path.join(DATA_DIR, "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# ⚠️ আপনার ইমেইল এবং এ্যাপ পাসওয়ার্ড (App Password) এখানে দিন
-SENDER_EMAIL = "cloudnestotp@gmail.com"
-APP_PASSWORD = "smeu dhdn zdou yfwc"
-
 ADMIN_EMAIL = "ufbfahimyt250@gmail.com"
-
-# Memory stores for OTPs
-dev_otp_store = {} # Developer Login/Reg/Forgot
-app_otp_store = {} # BaaS App users
-recent_otps = []   # Last 10 OTPs
 
 # ==========================================
 #         HELPER FUNCTIONS
@@ -65,39 +53,6 @@ def format_bytes(b):
     elif b < 1024**2: return f"{b/1024:.2f} KB"
     elif b < 1024**3: return f"{b/1024**2:.2f} MB"
     else: return f"{b/1024**3:.2f} GB"
-
-# ✅ FIX: Synchronous Email Sending with SMTP_SSL (Port 465) for better reliability
-def send_email(to_email, subject, body):
-    try:
-        msg = MIMEMultipart('alternative')
-        msg['Subject'] = subject
-        msg['From'] = f"CloudNest <{SENDER_EMAIL}>"
-        msg['To'] = to_email
-
-        # HTML part attach
-        part = MIMEText(body, 'html', 'utf-8')
-        msg.attach(part)
-
-        # Using SSL on Port 465 (Most secure and widely supported by Render/Heroku)
-        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
-        server.login(SENDER_EMAIL, APP_PASSWORD)
-        server.sendmail(SENDER_EMAIL, to_email, msg.as_string())
-        server.quit()
-        return True, "Email sent successfully"
-    except smtplib.SMTPAuthenticationError:
-        error_msg = "Gmail Authentication Failed. Please check App Password."
-        print(f"EMAIL_ERROR: {error_msg}")
-        return False, error_msg
-    except Exception as e:
-        error_msg = str(e)
-        print(f"EMAIL_ERROR: {error_msg}")
-        return False, error_msg
-
-def log_recent_otp(email, code, purpose):
-    global recent_otps
-    recent_otps.insert(0, {"email": email, "code": code, "purpose": purpose, "time": datetime.now().strftime("%I:%M %p, %d %b")})
-    if len(recent_otps) > 10:
-        recent_otps.pop()
 
 def check_monthly_limit(dev_info, limit_type, amount=1):
     if dev_info.get('plan') == 'premium':
@@ -133,93 +88,43 @@ def ping():
 
 @app.route('/')
 def home():
-    return jsonify({"status": "ok", "service": "CloudNest API", "version": "2.2"})
+    return jsonify({"status": "ok", "service": "CloudNest API", "version": "2.3 (Direct Auth)"})
 
 # ==========================================
-#         OTP & AUTHENTICATION
+#         DIRECT AUTHENTICATION (NO OTP)
 # ==========================================
-@app.route('/api/dev/send-otp', methods=['POST'])
-def dev_send_otp():
+@app.route('/api/dev/auth', methods=['POST'])
+def dev_auth():
     data = request.json or {}
     email = data.get('email', '').strip().lower()
+    password = data.get('password', '')
     action = data.get('action', '')
     
     if not email.endswith('@gmail.com'):
         return jsonify({"status": "error", "message": "Only @gmail.com is allowed!"})
         
     devs = load_devs()
-    if action == 'register' and email in devs:
-        return jsonify({"status": "error", "message": "This email is already registered."})
-    if action in ['login', 'forgot'] and email not in devs:
-        return jsonify({"status": "error", "message": "Email not found. Please register."})
-
-    import random
-    code = str(random.randint(100000, 999999))
-    dev_otp_store[email] = {
-        "code": code,
-        "expires": datetime.now() + timedelta(minutes=5),
-        "action": action
-    }
-    
-    html_body = f"""
-    <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; border: 1px solid #eaeaea; border-radius: 10px; overflow: hidden;">
-        <div style="background-color: #FF6D00; padding: 20px; text-align: center;">
-            <h1 style="color: #ffffff; margin: 0; font-size: 24px;">CloudNest Console</h1>
-        </div>
-        <div style="padding: 30px; background-color: #ffffff;">
-            <p style="font-size: 16px; color: #333333; margin-top: 0;">Hello,</p>
-            <p style="font-size: 16px; color: #555555;">Your verification code for CloudNest is:</p>
-            <div style="text-align: center; margin: 25px 0;">
-                <span style="font-size: 32px; font-weight: bold; letter-spacing: 5px; color: #1A1A2E; background-color: #F0F2F5; padding: 10px 20px; border-radius: 8px;">{code}</span>
-            </div>
-            <p style="font-size: 14px; color: #777777;">This code will expire in 5 minutes. Please do not share this code with anyone.</p>
-        </div>
-    </div>
-    """
-    
-    # ✅ Synchronous Call: Error catch for Frontend
-    success, err_msg = send_email(email, "Your CloudNest Verification Code", html_body)
-    
-    if success:
-        log_recent_otp(email, code, f"Dev {action.capitalize()}")
-        return jsonify({"status": "success", "message": "OTP sent to your email."})
-    else:
-        # If email fails, delete the OTP from memory so user can try again
-        if email in dev_otp_store: del dev_otp_store[email]
-        return jsonify({"status": "error", "message": f"Failed to send email: {err_msg}"})
-
-@app.route('/api/dev/verify-otp', methods=['POST'])
-def dev_verify_otp():
-    data = request.json or {}
-    email = data.get('email', '').strip().lower()
-    code = data.get('code', '').strip()
-    action = data.get('action', '')
-    
-    if email not in dev_otp_store or dev_otp_store[email]['code'] != code:
-        return jsonify({"status": "error", "message": "Invalid OTP code."})
-    if datetime.now() > dev_otp_store[email]['expires'] or dev_otp_store[email]['action'] != action:
-        return jsonify({"status": "error", "message": "OTP has expired. Request a new one."})
-        
-    del dev_otp_store[email]
-    devs = load_devs()
     
     if action == 'register':
-        password = data.get('password', '')
+        if email in devs:
+            return jsonify({"status": "error", "message": "This email is already registered."})
         name = data.get('name', '')
+        if len(password) < 6:
+            return jsonify({"status": "error", "message": "Password must be at least 6 characters."})
+            
         api_key = generate_api_key(email)
         devs[email] = {"name": name, "email": email, "password": password, "api_key": api_key, "plan": "free", "usage": {}}
         save_devs(devs)
         return jsonify({"status": "success", "message": "Registration successful!", "api_key": api_key, "name": name, "email": email, "plan": "free"})
         
     elif action == 'login':
+        if email not in devs or devs[email].get('password') != password:
+            return jsonify({"status": "error", "message": "Invalid email or password."})
+            
         info = devs[email]
-        return jsonify({"status": "success", "api_key": info['api_key'], "name": info['name'], "email": email, "plan": info.get('plan', 'free')})
-        
-    elif action == 'forgot':
-        new_password = data.get('new_password', '')
-        devs[email]['password'] = new_password
-        save_devs(devs)
-        return jsonify({"status": "success", "message": "Password updated successfully!"})
+        return jsonify({"status": "success", "message": "Login successful!", "api_key": info['api_key'], "name": info['name'], "email": email, "plan": info.get('plan', 'free')})
+
+    return jsonify({"status": "error", "message": "Invalid action."})
 
 # ==========================================
 #         ADMIN PREMIUM FEATURE
@@ -240,14 +145,6 @@ def make_premium():
         save_devs(devs)
         return jsonify({"status": "success", "message": f"{target_email} has been upgraded to Premium!"})
     return jsonify({"status": "error", "message": "User not found."})
-
-@app.route('/api/admin/recent-otps', methods=['POST'])
-def get_recent_otps():
-    api_key = (request.json or {}).get('api_key')
-    user_email, _ = get_dev_by_api_key(api_key)
-    if not user_email:
-        return jsonify({"status": "error", "message": "Unauthorized"})
-    return jsonify({"status": "success", "data": recent_otps})
 
 # ==========================================
 #         DATABASE, AUTH, STORAGE APIs
@@ -337,41 +234,6 @@ def api_auth():
         return jsonify({"status": "error", "message": "User not found."})
 
     return jsonify({"status": "error", "message": "Invalid action."})
-
-@app.route('/api/auth/send-otp', methods=['POST'])
-def baas_send_otp():
-    data = request.json or {}
-    api_key = data.get('api_key')
-    email = data.get('email', '')
-    user_email, _ = get_dev_by_api_key(api_key)
-    if not user_email: return jsonify({"status": "error", "message": "Invalid API Key."})
-    
-    import random
-    code = str(random.randint(100000, 999999))
-    app_otp_store[api_key + "_" + email] = {"code": code, "expires": datetime.now() + timedelta(minutes=5)}
-    
-    html_body = f"<h2>Your App Verification Code: {code}</h2>"
-    
-    success, err_msg = send_email(email, "App Verification Code", html_body)
-    if success:
-        log_recent_otp(email, code, f"App Auth")
-        return jsonify({"status": "success", "message": "OTP Sent!"})
-    else:
-        return jsonify({"status": "error", "message": f"SMTP Error: {err_msg}"})
-
-@app.route('/api/auth/verify-otp', methods=['POST'])
-def baas_verify_otp():
-    data = request.json or {}
-    api_key = data.get('api_key')
-    email = data.get('email', '')
-    code = data.get('code', '')
-    store_key = api_key + "_" + email
-    
-    if store_key in app_otp_store and app_otp_store[store_key]['code'] == code:
-        if datetime.now() < app_otp_store[store_key]['expires']:
-            del app_otp_store[store_key]
-            return jsonify({"status": "success", "message": "OTP Verified"})
-    return jsonify({"status": "error", "message": "Invalid or expired OTP"})
 
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
