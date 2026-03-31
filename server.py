@@ -80,15 +80,20 @@ def update_monthly_limit(email, limit_type, amount=1):
         save_devs(devs)
 
 # ==========================================
-#         KEEP-ALIVE
+#         CRON & KEEP-ALIVE (FIXED FOR CRON-JOB.ORG)
 # ==========================================
-@app.route('/ping')
-def ping():
-    return "ok", 200
+@app.route('/cron', methods=['GET', 'HEAD'])
+def cron():
+    # Returns a tiny 2-byte response so cron-job.org never gives "Output too large" error
+    return "OK", 200
 
-@app.route('/')
+@app.route('/ping', methods=['GET', 'HEAD'])
+def ping():
+    return "OK", 200
+
+@app.route('/', methods=['GET', 'HEAD'])
 def home():
-    return jsonify({"status": "ok", "service": "CloudNest API", "version": "3.0"})
+    return jsonify({"status": "ok", "service": "CloudNest API", "version": "3.1"})
 
 # ==========================================
 #         DIRECT AUTHENTICATION (NO OTP)
