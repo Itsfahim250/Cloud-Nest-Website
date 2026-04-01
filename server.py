@@ -8,11 +8,13 @@ from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
 # ==========================================
-#         CONFIGURATION
+#         CONFIGURATION & SETUP
 # ==========================================
+# Render-এর জন্য ডায়নামিক পোর্ট সেটআপ
 PORT = int(os.environ.get("PORT", 8080))
 app = Flask(__name__)
-CORS(app)
+# CORS এনাবল করা হলো যাতে HTML/Frontend থেকে কোনো এরর না আসে
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -23,17 +25,37 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 ADMIN_EMAIL = "ufbfahimyt250@gmail.com"
 
 # ==========================================
+#         GLOBAL ERROR HANDLER (CRITICAL FIX)
+# ==========================================
+# সার্ভারে কোনো সমস্যা হলে লোডিং যেন আটকে না থাকে, তাই এই গ্লোবাল এরর হ্যান্ডলার
+@app.errorhandler(Exception)
+def handle_exception(e):
+    return jsonify({"status": "error", "message": f"Server Error: {str(e)}"}), 500
+
+# ==========================================
 #         HELPER FUNCTIONS
 # ==========================================
+def load_json_safe(filepath, default_val=None):
+    """নিরাপদে JSON ফাইল লোড করার ফাংশন, যাতে ফাইল করাপ্ট হলে সার্ভার ক্র্যাশ না করে"""
+    if default_val is None:
+        default_val = {}
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, "r") as f:
+                return json.load(f)
+        except Exception:
+            return default_val
+    return default_val
+
 def load_devs():
-    if os.path.exists(DEV_DATA_FILE):
-        with open(DEV_DATA_FILE, "r") as f:
-            return json.load(f)
-    return {}
+    return load_json_safe(DEV_DATA_FILE, {})
 
 def save_devs(devs):
-    with open(DEV_DATA_FILE, "w") as f:
-        json.dump(devs, f, indent=4)
+    try:
+        with open(DEV_DATA_FILE, "w") as f:
+            json.dump(devs, f, indent=4)
+    except Exception as e:
+        print(f"Error saving devs: {e}")
 
 def generate_api_key(email):
     return "cn_" + hashlib.sha256(email.encode()).hexdigest()[:32]
@@ -80,11 +102,10 @@ def update_monthly_limit(email, limit_type, amount=1):
         save_devs(devs)
 
 # ==========================================
-#         CRON & KEEP-ALIVE (FIXED FOR CRON-JOB.ORG)
+#         CRON & KEEP-ALIVE
 # ==========================================
 @app.route('/cron', methods=['GET', 'HEAD'])
 def cron():
-    # Returns a tiny 2-byte response so cron-job.org never gives "Output too large" error
     return "OK", 200
 
 @app.route('/ping', methods=['GET', 'HEAD'])
@@ -93,7 +114,7 @@ def ping():
 
 @app.route('/', methods=['GET', 'HEAD'])
 def home():
-    return jsonify({"status": "ok", "service": "CloudNest API", "version": "3.1"})
+    return jsonify({"status": "ok", "service": "CloudNest API", "version": "3.1.1 (Stable)"})
 
 # ==========================================
 #         DIRECT AUTHENTICATION (NO OTP)
@@ -173,14 +194,12 @@ def api_db():
     if not user_email: return jsonify({"status": "error", "message": "Invalid API Key."})
 
     db_file = os.path.join(DATA_DIR, f"{api_key}_db.json")
-    db_data = {}
-    if os.path.exists(db_file):
-        with open(db_file, "r") as f: db_data = json.load(f)
+    db_data = load_json_safe(db_file, {})
 
     if action in ['save', 'edit']:
         payload_size = len(str(payload).encode('utf-8'))
         allowed, msg = check_monthly_limit(dev_info, 'db', payload_size)
-        if not allowed: return jsonify({"status": "error", "message": msg})
+        if not allowed: return jsonify({"status": "error", "message": str(msg)})
         
         db_data[key] = payload
         with open(db_file, "w") as f: json.dump(db_data, f, indent=2)
@@ -211,14 +230,12 @@ def api_auth():
     if not user_email: return jsonify({"status": "error", "message": "Invalid API Key."})
 
     auth_file = os.path.join(DATA_DIR, f"{api_key}_auth.json")
-    auth_data = {}
-    if os.path.exists(auth_file):
-        with open(auth_file, "r") as f: auth_data = json.load(f)
+    auth_data = load_json_safe(auth_file, {})
 
     if action == 'register':
         if username in auth_data: return jsonify({"status": "error", "message": "User already exists!"})
         allowed, msg = check_monthly_limit(dev_info, 'auth', 1)
-        if not allowed: return jsonify({"status": "error", "message": msg})
+        if not allowed: return jsonify({"status": "error", "message": str(msg)})
         
         uid = str(uuid.uuid4())
         auth_data[username] = {"password": password, "uid": uid}
@@ -227,7 +244,7 @@ def api_auth():
         return jsonify({"status": "success", "message": "Registered!", "uid": uid})
 
     elif action == 'login':
-        if username in auth_data and auth_data[username]['password'] == password:
+        if username in auth_data and auth_data[username].get('password') == password:
             return jsonify({"status": "success", "message": "Logged in!", "uid": auth_data[username].get('uid', '')})
         return jsonify({"status": "error", "message": "Wrong credentials."})
     elif action == 'all':
@@ -262,7 +279,7 @@ def upload_file():
     file.seek(0)
     
     allowed, msg = check_monthly_limit(dev_info, 'storage', file_size)
-    if not allowed: return jsonify({"status": "error", "message": msg})
+    if not allowed: return jsonify({"status": "error", "message": str(msg)})
 
     filename = secure_filename(file.filename)
     unique_filename = f"{api_key}_{uuid.uuid4().hex[:8]}_{filename}"
@@ -281,19 +298,20 @@ def list_files():
     if not user_email: return jsonify({"status": "error", "message": "Invalid API Key."})
 
     files = []
-    for fname in os.listdir(UPLOAD_FOLDER):
-        if fname.startswith(api_key + "_"):
-            fpath = os.path.join(UPLOAD_FOLDER, fname)
-            size = os.path.getsize(fpath)
-            ext = fname.rsplit('.', 1)[-1].lower() if '.' in fname else 'file'
-            files.append({
-                "filename": fname,
-                "display_name": fname.replace(f"{api_key}_", "", 1),
-                "url": f"{get_host_url()}/uploads/{fname}",
-                "size": size,
-                "size_str": format_bytes(size),
-                "ext": ext
-            })
+    if os.path.exists(UPLOAD_FOLDER):
+        for fname in os.listdir(UPLOAD_FOLDER):
+            if fname.startswith(api_key + "_"):
+                fpath = os.path.join(UPLOAD_FOLDER, fname)
+                size = os.path.getsize(fpath)
+                ext = fname.rsplit('.', 1)[-1].lower() if '.' in fname else 'file'
+                files.append({
+                    "filename": fname,
+                    "display_name": fname.replace(f"{api_key}_", "", 1),
+                    "url": f"{get_host_url()}/uploads/{fname}",
+                    "size": size,
+                    "size_str": format_bytes(size),
+                    "ext": ext
+                })
     return jsonify({"status": "success", "files": files})
 
 @app.route('/api/storage/delete', methods=['POST'])
@@ -325,10 +343,11 @@ def usage():
     
     storage_bytes = 0
     file_count = 0
-    for fname in os.listdir(UPLOAD_FOLDER):
-        if fname.startswith(api_key + "_"):
-            storage_bytes += os.path.getsize(os.path.join(UPLOAD_FOLDER, fname))
-            file_count += 1
+    if os.path.exists(UPLOAD_FOLDER):
+        for fname in os.listdir(UPLOAD_FOLDER):
+            if fname.startswith(api_key + "_"):
+                storage_bytes += os.path.getsize(os.path.join(UPLOAD_FOLDER, fname))
+                file_count += 1
 
     db_file = os.path.join(DATA_DIR, f"{api_key}_db.json")
     auth_file = os.path.join(DATA_DIR, f"{api_key}_auth.json")
@@ -361,7 +380,10 @@ def rules_api():
 
     if action == 'get':
         if os.path.exists(rules_file):
-            with open(rules_file) as f: return jsonify({"status": "success", "rules": f.read()})
+            try:
+                with open(rules_file) as f: return jsonify({"status": "success", "rules": f.read()})
+            except:
+                pass
         return jsonify({"status": "success", "rules": default_rules})
 
     elif action == 'update':
@@ -374,4 +396,5 @@ def rules_api():
     return jsonify({"status": "error", "message": "Invalid action."})
 
 if __name__ == '__main__':
+    # Production Level execution setup
     app.run(host="0.0.0.0", port=PORT, use_reloader=False)
